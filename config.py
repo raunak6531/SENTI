@@ -26,6 +26,7 @@ class Settings:
 
     TMDB_API_KEY: str
     DATABASE_URL: str
+    GEMINI_API_KEY: str
 
     # TMDB REST API base URL (v3)
     TMDB_BASE_URL: str = "https://api.themoviedb.org/3"
@@ -36,9 +37,19 @@ class Settings:
     # Seconds to wait between TMDB API calls to respect rate limits
     API_RATE_LIMIT_SLEEP: float = 0.25
 
-    # Local staging file paths (raw Data Lake)
+    # Seconds to wait between Gemini API calls to respect rate limits
+    GEMINI_RATE_LIMIT_SLEEP: float = 1.0
+
+    # Maximum review character length before truncation (Gemini context budget)
+    MAX_REVIEW_CHARS: int = 2000
+
+    # Local staging file paths — raw Data Lake (Phase 1 output)
     RAW_MOVIES_PATH: str = "raw_movies.json"
     RAW_REVIEWS_PATH: str = "raw_reviews.json"
+
+    # Local staging file paths — transformed (Phase 2 output)
+    TRANSFORMED_MOVIES_PATH: str = "transformed_movies.json"
+    TRANSFORMED_REVIEWS_PATH: str = "transformed_reviews.json"
 
 
 def _require_env(var_name: str) -> str:
@@ -67,4 +78,5 @@ def _require_env(var_name: str) -> str:
 settings = Settings(
     TMDB_API_KEY=_require_env("TMDB_API_KEY"),
     DATABASE_URL=_require_env("DATABASE_URL"),
+    GEMINI_API_KEY=_require_env("GEMINI_API_KEY"),
 )
