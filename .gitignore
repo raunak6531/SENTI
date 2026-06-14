@@ -1,0 +1,23 @@
+# --- Security / Credentials ---
+.env
+
+# --- Local Data Lake / JSON Staging ---
+*.json
+!requirements.txt
+!.env.example
+
+# --- Python Environment & Caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.env/
+
+# --- IDE / OS Caches ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
