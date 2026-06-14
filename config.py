@@ -26,7 +26,7 @@ class Settings:
 
     TMDB_API_KEY: str
     DATABASE_URL: str
-    GEMINI_API_KEY: str
+    GROQ_API_KEY: str
 
     # TMDB REST API base URL (v3)
     TMDB_BASE_URL: str = "https://api.themoviedb.org/3"
@@ -37,10 +37,10 @@ class Settings:
     # Seconds to wait between TMDB API calls to respect rate limits
     API_RATE_LIMIT_SLEEP: float = 0.25
 
-    # Seconds to wait between Gemini API calls to respect rate limits
-    GEMINI_RATE_LIMIT_SLEEP: float = 1.0
+    # Seconds to wait between Groq API calls — 2.1 s keeps us under 30 RPM
+    GEMINI_RATE_LIMIT_SLEEP: float = 2.1
 
-    # Maximum review character length before truncation (Gemini context budget)
+    # Maximum review character length before truncation (LLM context budget)
     MAX_REVIEW_CHARS: int = 2000
 
     # Local staging file paths — raw Data Lake (Phase 1 output)
@@ -78,5 +78,5 @@ def _require_env(var_name: str) -> str:
 settings = Settings(
     TMDB_API_KEY=_require_env("TMDB_API_KEY"),
     DATABASE_URL=_require_env("DATABASE_URL"),
-    GEMINI_API_KEY=_require_env("GEMINI_API_KEY"),
+    GROQ_API_KEY=_require_env("GROQ_API_KEY"),
 )

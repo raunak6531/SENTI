@@ -6,8 +6,8 @@ Phase 2 — Transformation layer for the Cinematic Sentiment & Trend Engine.
 Responsibilities:
     1. Load raw JSON staging files produced by extract.py.
     2. Clean and type-cast data using Pandas.
-    3. Run Gemini-powered aspect-based sentiment analysis on every review,
-       using a strict Pydantic response schema to guarantee structured output.
+    3. Run Groq/Llama-3-powered aspect-based sentiment analysis on every review,
+       using Pydantic to validate the structured JSON response.
     4. Merge AI analysis back into the reviews DataFrame.
     5. Persist two clean staging files ready for Phase 3 (Load):
        - transformed_movies.json
@@ -17,9 +17,9 @@ Run:
     python transform.py
 
 Environment variables required (see .env.example):
-    TMDB_API_KEY   — (loaded via config; not used here directly)
-    DATABASE_URL   — (loaded via config; not used here directly)
-    GEMINI_API_KEY — Your Google Gemini API key.
+    TMDB_API_KEY  — (loaded via config; not used here directly)
+    DATABASE_URL  — (loaded via config; not used here directly)
+    GROQ_API_KEY  — Your Groq API key.
 """
 
 from __future__ import annotations
@@ -32,9 +32,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
-from google import genai
-from google.genai import types as genai_types
-from pydantic import BaseModel, Field, field_validator
+from groq import Groq
+from pydantic import BaseModel, Field, field_validator, ValidationError
 
 from config import settings
 
@@ -49,10 +48,10 @@ logging.basicConfig(
 logger: logging.Logger = logging.getLogger("transform")
 
 # ---------------------------------------------------------------------------
-# Gemini Client (initialised once)
+# Groq Client (initialised once)
 # ---------------------------------------------------------------------------
-_gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
-_GEMINI_MODEL = "gemini-2.0-flash"
+_groq_client = Groq(api_key=settings.GROQ_API_KEY)
+_GROQ_MODEL = "llama-3.1-8b-instant"
 
 # ---------------------------------------------------------------------------
 # Pydantic Schema — Gemini Structured Output Contract
@@ -261,31 +260,44 @@ def clean_reviews(raw: list[dict[str, Any]]) -> pd.DataFrame:
 
 def _build_prompt(review_text: str) -> str:
     """
-    Construct the system + user prompt for aspect-based sentiment analysis.
+    Construct the user prompt for aspect-based sentiment analysis.
+
+    The system prompt (passed separately to the Groq API) instructs the model
+    to return ONLY a raw JSON object with no markdown fencing or extra text.
 
     Args:
         review_text: The cleaned review content.
 
     Returns:
-        A formatted prompt string.
+        A formatted user prompt string.
     """
     return (
-        "You are an expert film critic analyst. Analyse the following movie review "
-        "and return a structured JSON object.\n\n"
-        "Rules:\n"
-        "- Score each cinematic aspect on a scale of 1 (very negative) to 10 (very positive).\n"
-        "- If a specific aspect is not meaningfully discussed, return null for its score.\n"
-        "- Choose the overall_sentiment that best represents the review's emotional tone.\n\n"
+        f"Analyse the following movie review and return your assessment.\n\n"
         f"Review:\n---\n{review_text}\n---"
     )
 
 
+_SYSTEM_PROMPT = (
+    "You are an expert film critic analyst. "
+    "When given a movie review, you must respond with ONLY a valid JSON object — "
+    "no markdown, no code fences, no extra text. "
+    "The JSON object must have exactly these four keys:\n"
+    '  • “direction_score”: integer 1–10 (how positively direction was discussed) or null if not mentioned.\n'
+    '  • “cinematography_score”: integer 1–10 (visuals/cinematography) or null if not mentioned.\n'
+    '  • “pacing_score”: integer 1–10 (narrative pacing/editing) or null if not mentioned.\n'
+    '  • “overall_sentiment”: exactly one of the strings "Positive", "Neutral", or "Negative".\n'
+    "Respond with the JSON object only."
+)
+
+
 def analyse_review(review_text: str, review_id: str) -> ReviewSentiment:
     """
-    Call the Gemini API to perform aspect-based sentiment analysis on a review.
+    Call the Groq API (Llama 3.1 8B Instant) to perform aspect-based
+    sentiment analysis on a single review.
 
-    Uses ``response_schema`` to constrain Gemini's output to the
-    :class:`ReviewSentiment` Pydantic schema, ensuring clean, parseable JSON.
+    Uses ``response_format={"type": "json_object"}`` to force the model to
+    output valid JSON, which is then parsed and validated through the
+    :class:`ReviewSentiment` Pydantic model.
 
     Falls back to :data:`_FALLBACK_SENTIMENT` on any error so the pipeline
     continues uninterrupted.
@@ -298,28 +310,33 @@ def analyse_review(review_text: str, review_id: str) -> ReviewSentiment:
         A :class:`ReviewSentiment` instance (may be the fallback).
     """
     try:
-        response = _gemini_client.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=_build_prompt(review_text),
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=ReviewSentiment,
-                temperature=0.1,  # Low temperature for deterministic structured output
-            ),
+        response = _groq_client.chat.completions.create(
+            model=_GROQ_MODEL,
+            response_format={"type": "json_object"},
+            temperature=0.1,  # Low temperature for deterministic structured output
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user",   "content": _build_prompt(review_text)},
+            ],
         )
 
-        # The SDK parses the response into the Pydantic model automatically
-        # when response_schema is a BaseModel subclass.
-        parsed: ReviewSentiment = response.parsed  # type: ignore[assignment]
-        if parsed is None:
-            raise ValueError("Gemini returned an empty parsed response.")
-        return parsed
+        raw_json: str = response.choices[0].message.content or ""
+        if not raw_json.strip():
+            raise ValueError("Groq returned an empty response.")
 
+        payload = json.loads(raw_json)
+        return ReviewSentiment(**payload)
+
+    except (json.JSONDecodeError, ValidationError) as exc:
+        logger.error(
+            "Schema validation failed for review_id='%s': %s — using fallback values.",
+            review_id, exc,
+        )
+        return _FALLBACK_SENTIMENT
     except Exception as exc:  # noqa: BLE001 — broad catch is intentional here
         logger.error(
-            "Gemini analysis failed for review_id='%s': %s — using fallback values.",
-            review_id,
-            exc,
+            "Groq API call failed for review_id='%s': %s — using fallback values.",
+            review_id, exc,
         )
         return _FALLBACK_SENTIMENT
 
