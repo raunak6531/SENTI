@@ -33,9 +33,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
+import numpy as np  # noqa: F401 — kept for future use
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -71,6 +73,51 @@ ALTER TABLE reviews
     ADD COLUMN IF NOT EXISTS pacing_score          INTEGER,
     ADD COLUMN IF NOT EXISTS overall_sentiment     TEXT;
 """
+
+
+# ---------------------------------------------------------------------------
+# NaN Scrubbing Helper
+# ---------------------------------------------------------------------------
+
+_SCORE_COLS = {"direction_score", "cinematography_score", "pacing_score"}
+
+
+def _scrub_records(raw_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Post-process a list of row dicts produced by ``DataFrame.to_dict()``.
+
+    This is the only reliable NaN-elimination strategy: operating on Python
+    native floats AFTER pandas has finished all internal dtype conversions,
+    so ``math.isnan()`` can detect every NaN regardless of how it originated.
+
+    Transformations applied:
+    - Float NaN in score columns  → ``None``  (PostgreSQL NULL)
+    - Valid float in score columns → ``int``   (PostgreSQL INTEGER)
+    - Float NaN in any other column → ``None``
+
+    Args:
+        raw_records: Output of ``DataFrame.to_dict(orient='records')``.
+
+    Returns:
+        The same records with all NaN replaced and score columns cast to int.
+    """
+    cleaned: list[dict[str, Any]] = []
+    for record in raw_records:
+        clean_row: dict[str, Any] = {}
+        for key, val in record.items():
+            if key in _SCORE_COLS:
+                # Score columns → int or None
+                if val is None or (isinstance(val, float) and math.isnan(val)):
+                    clean_row[key] = None
+                else:
+                    clean_row[key] = int(val)
+            elif isinstance(val, float) and math.isnan(val):
+                # Any other NaN column → None
+                clean_row[key] = None
+            else:
+                clean_row[key] = val
+        cleaned.append(clean_row)
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -165,8 +212,8 @@ def _prepare_movies(df: pd.DataFrame) -> list[dict[str, Any]]:
 
     df.dropna(subset=["movie_id", "title"], inplace=True)
 
-    # Replace pandas NA/NaN with None so psycopg2 writes NULL correctly
-    records = df.where(df.notna(), other=None).to_dict(orient="records")
+    # Call to_dict first (gets Python native types), then scrub NaN → None.
+    records = _scrub_records(df.to_dict(orient="records"))
     logger.info("Movies prepared: %d rows to upsert.", len(records))
     return records
 
@@ -203,16 +250,16 @@ def _prepare_reviews(df: pd.DataFrame) -> list[dict[str, Any]]:
 
     df = df[schema_cols].copy()
 
-    # Coerce types
+    # Coerce movie_id to nullable integer
     df["movie_id"] = pd.to_numeric(df["movie_id"], errors="coerce").astype("Int64")
-    for score_col in ("direction_score", "cinematography_score", "pacing_score"):
-        df[score_col] = pd.to_numeric(df[score_col], errors="coerce").where(
-            df[score_col].notna(), other=None
-        )
 
     df.dropna(subset=["review_id", "movie_id"], inplace=True)
 
-    records = df.where(df.notna(), other=None).to_dict(orient="records")
+    # Call to_dict first (gets Python native floats), then scrub:
+    #   NaN score  → None (NULL)
+    #   float score → int
+    #   any other NaN → None
+    records = _scrub_records(df.to_dict(orient="records"))
     logger.info("Reviews prepared: %d rows to upsert.", len(records))
     return records
 
